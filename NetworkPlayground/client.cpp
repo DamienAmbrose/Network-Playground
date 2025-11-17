@@ -1,9 +1,14 @@
 #include <iostream>
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib") // Link with Winsock library
+#include <thread>
+#include "client.h"
+
+#pragma comment(lib, "ws2_32.lib")
 #define LOOPBACK_IPv4 "127.0.0.1"
 #define PACKET_SIZE_BYTES 1024
+
+std::atomic<bool> receiving(true);
 
 int main() {
 	WSADATA WSAData;
@@ -95,7 +100,12 @@ int main() {
 		(sockaddr*)&serverAddress, 
 		sizeof(serverAddress)
 	);
-	std::cout << "Message has been sent. Receiving UDP packets from network..." << std::endl;
+	std::cout << "Message has been sent. Receiving UDP packets from network (press enter to cancel)... " << std::endl;
+
+	std::thread inputThread(blockUntilInput);
+	std::thread receivingThread(receivePackets);
+	inputThread.join();
+	receivingThread.join();
 
 	closesocket(clientSocket);
 	std::cout << "Socket successfully closed." << std::endl;
@@ -103,4 +113,22 @@ int main() {
 	WSACleanup();
 	std::cout << "WSACleanup succeeded." << std::endl;
 	return 0;
+}
+
+void blockUntilInput() {
+	std::cin.clear();
+	std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+	std::cin.get();
+	receiving = false;
+}
+
+void receivePackets(/*SOCKET socket*/) {
+	char buffer[PACKET_SIZE_BYTES];
+
+	while (receiving) {
+		std::cout << std::endl << "Sample data packet." << std::endl;
+		Sleep(500);
+	}
+
+	std::cout << "Stopped receiving packets." << std::endl;
 }
