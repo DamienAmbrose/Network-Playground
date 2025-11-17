@@ -1,4 +1,4 @@
 #pragma once
 
-void blockUntilInput();
-void receivePackets(/*SOCKET socket*/);
+void blockUntilInput(SOCKET socket);
+void receivePackets(SOCKET socket);
