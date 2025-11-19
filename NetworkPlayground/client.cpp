@@ -2,6 +2,8 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <thread>
+#include <mutex>
+#include <string>
 #include "client.h"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -12,6 +14,7 @@
 #define EXIT 3
 
 std::atomic<bool> receiving(true);
+std::mutex outputLock;
 
 int main() {
 	bool running = true;
@@ -41,8 +44,9 @@ int main() {
 
 		SOCKET clientSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 		if (clientSocket == INVALID_SOCKET) {
-			WSACleanup();
 			std::cerr << "Socket creation failed! Aborting..." << std::endl;
+			WSACleanup();
+			std::cout << "WSACleanup succeeded." << std::endl;
 			return 1;
 		}
 
@@ -52,11 +56,13 @@ int main() {
 		local_address.sin_port = htons(0);
 		std::cout << "Socket creation succeeded." << std::endl;
 
-		if (bind(clientSocket, (sockaddr*)&local_address, sizeof(local_address)) == SOCKET_ERROR) {
-			closesocket(clientSocket);
-			std::cout << "Socket successfully closed.\n";
-			WSACleanup();
+		int bind_result = bind(clientSocket, (sockaddr*)&local_address, sizeof(local_address));
+		if (bind_result == SOCKET_ERROR) {
 			std::cerr << "Socket binding failed! Aborting..." << std::endl;
+			closesocket(clientSocket);
+			std::cout << "Socket successfully closed." << std::endl;
+			WSACleanup();
+			std::cout << "WSACleanup succeeded." << std::endl;
 			return 1;
 		}
 		std::cout << "Socket binding succeeded." << std::endl;
@@ -65,17 +71,18 @@ int main() {
 			sockaddr_in serverAddress;
 			configure_server_socket(&serverAddress);
 
-			char MessageBuffer[PACKET_SIZE];
+			std::string MessageBuffer;
 			get_message(MessageBuffer);
 
 			sendto(
 				clientSocket,
-				MessageBuffer,
-				strlen(MessageBuffer),
+				MessageBuffer.c_str(),
+				MessageBuffer.length(),
 				0,
 				(sockaddr*)&serverAddress,
 				sizeof(serverAddress)
 			);
+			std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
 			std::cout << "Message has been sent succesfully from ";
 		}
 
@@ -113,20 +120,21 @@ void configure_server_socket(sockaddr_in *server_address) {
 	// todo: make the ip protocol agnostic
 	server_address->sin_family = AF_INET;
 
-	char IP_address[INET_ADDRSTRLEN] = LOOPBACK_IPv4;
+	std::string IP_address = LOOPBACK_IPv4;
 	do {
 		std::cout << "Enter IP address to bind the server (default 127.0.0.1): ";
 
 		std::cin.clear();
-		std::cin.getline(IP_address, INET_ADDRSTRLEN);
-		if (strlen(IP_address) == 0) {
-			strncpy_s(IP_address, sizeof(IP_address), LOOPBACK_IPv4, sizeof(LOOPBACK_IPv4));
+		std::getline(std::cin, IP_address);
+		if (IP_address.length() == 0) {
+			IP_address = LOOPBACK_IPv4;
 			break;
 		}
 
-		if (inet_pton(AF_INET, IP_address, &server_address->sin_addr) == 1) break;
+		unsigned short int valid_IP_address = inet_pton(AF_INET, IP_address.c_str(), &server_address->sin_addr);
+		if (valid_IP_address == 1) break;
 		
-		strncpy_s(IP_address, "127.0.0.1", INET_ADDRSTRLEN);
+		IP_address = LOOPBACK_IPv4;
 		std::cerr << "    Invalid IP address format!" << std::endl;
 	} while (true);
 
@@ -147,17 +155,17 @@ void configure_server_socket(sockaddr_in *server_address) {
 		}
 	} while (port <= 0 || port > 65535);
 
-	std::cout << "Server successfully configured:" << std::endl;
-	std::cout << "    IPv4: " << IP_address << ":" << ntohs(server_address->sin_port) << std::endl;
+	std::cout << "Server successfully configured on IPv4: " << IP_address << ":" << ntohs(server_address->sin_port) << std::endl;
 }
 
-void get_message(char MessageBuffer[]) {
+void get_message(std::string MessageBuffer) {
 	do {
 		std::cout << "Enter message to send to server: ";
 
 		std::cin.clear();
 		std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
-		std::cin.getline(MessageBuffer, PACKET_SIZE);
+		std::cin >> MessageBuffer;
+		if (MessageBuffer.length() > PACKET_SIZE) MessageBuffer.resize(PACKET_SIZE);
 
 		std::cout <<
 			"The following message will be sent to the server: " << std::endl <<
@@ -171,13 +179,13 @@ void get_message(char MessageBuffer[]) {
 }
 
 void block_until_input(SOCKET socket) {
-	std::cin.clear();
-	std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
 	std::cin.get();
 
+	outputLock.lock();
 	receiving = false;
 	closesocket(socket);
-	std::cout << "Socket successfully closed.\n";
+	std::cout << "Socket successfully closed." << std::endl;
+	outputLock.unlock();
 }
 
 void receive_packets(SOCKET socket) {
@@ -196,6 +204,7 @@ void receive_packets(SOCKET socket) {
 		);
 
 		if (!receiving) break;
+		outputLock.lock();
 
 		char fromIPAddressBuffer[INET_ADDRSTRLEN];
 		PCSTR fromIPAddress = inet_ntop(AF_INET, &(fromSocket.sin_addr), fromIPAddressBuffer, INET_ADDRSTRLEN);
@@ -214,7 +223,10 @@ void receive_packets(SOCKET socket) {
 			continue;
 		}
 
+		outputLock.unlock();
 		std::this_thread::sleep_for(std::chrono::milliseconds(150));
 	}
+	outputLock.lock();
 	std::cout << "Stopped receiving packets." << std::endl;
+	outputLock.unlock();
 }
