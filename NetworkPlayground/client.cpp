@@ -9,23 +9,26 @@
 #pragma comment(lib, "ws2_32.lib")
 #define LOOPBACK_IPv4 "127.0.0.1"
 #define PACKET_SIZE 1024
-#define SEND_RECEIVE 1
-#define RECEIVE 2
-#define EXIT 3
 
-sockaddr_in Local_Address_Placeholder;
+typedef enum {
+	SEND_RECEIVE = 1,
+	RECEIVE = 2,
+	EXIT = 3
+} Directives;
+
 std::atomic<bool> Receiving_Packets(false);
 std::mutex Output_Stream_Lock;
 
 int main() {
+	sockaddr_in Local_Address_Placeholder{};
 	Local_Address_Placeholder.sin_family = AF_INET;
 	Local_Address_Placeholder.sin_addr.s_addr = htonl(INADDR_ANY);
 	Local_Address_Placeholder.sin_port = htons(0);
 
-	int8_t startup_result = startup_sockets_API();
+	const int startup_result = startup_sockets_API();
 	if (startup_result == SOCKET_ERROR) {
-		std::cerr << "Sockets API did not start correctly. Aborting..." << std::endl;
-		return 1;
+		std::cerr << "Sockets API did not start correctly (" << get_last_sockets_error() << ")! Aborting..." << std::endl;
+		return EXIT_FAILURE;
 	}
 
 	do {
@@ -37,7 +40,11 @@ int main() {
 			"    3. Cleanup sockets API and exit" << std::endl <<
 			"Enter your desired directive (1 or 2 or 3): ";
 		std::cin >> directive;
-		clear_and_flush_input_stream();
+		if (std::cin.fail()) {
+			reset_input_stream();
+			continue;
+		}
+		reset_input_stream();
 
 		if (directive < 1 || directive > 3) continue;
 		if (directive == EXIT) break;
@@ -45,50 +52,56 @@ int main() {
 
 		SOCKET client_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 		if (client_socket == INVALID_SOCKET) {
-			std::cerr << "Socket creation failed! Aborting..." << std::endl;
+			std::cerr << "Socket creation failed (" << get_last_sockets_error() << ")! Aborting..." << std::endl;
 			cleanup_sockets_API();
-			return 1;
+			return EXIT_FAILURE;
 		}
 		std::cout << "Socket creation succeeded." << std::endl;
 
-		int bind_result = bind(client_socket, (sockaddr*)&Local_Address_Placeholder, sizeof(sockaddr_in));
+		const int bind_result = bind(client_socket, reinterpret_cast<sockaddr*>(&Local_Address_Placeholder), sizeof(Local_Address_Placeholder));
 		if (bind_result == SOCKET_ERROR) {
-			std::cerr << "Socket binding failed! Aborting..." << std::endl;
+			std::cerr << "Socket binding failed (" << get_last_sockets_error() << ")! Aborting..." << std::endl;
 			closesocket(client_socket);
-			std::cout << "Socket successfully closed." << std::endl;
+			std::cout << "Socket closed." << std::endl;
 			cleanup_sockets_API();
-			return 1;
+			return EXIT_FAILURE;
 		}
 		std::cout << "Socket binding succeeded." << std::endl;
 
-		sockaddr_in local_address_data;
-		int8_t local_address_result = get_socket_address(client_socket, local_address_data);
+		sockaddr_in local_address_data{};
+		const int local_address_result = get_socket_address(client_socket, local_address_data);
 		if (local_address_result == SOCKET_ERROR) {
-			std::cout << "Retrieving socket information failed! Aborting..." << std::endl;
+			std::cout << "Retrieving socket information failed (" << get_last_sockets_error() << ")! Aborting..." << std::endl;
 			closesocket(client_socket);
-			std::cout << "Socket successfully closed." << std::endl;
+			std::cout << "Socket closed." << std::endl;
 			cleanup_sockets_API();
-			return 1;
+			return EXIT_FAILURE;
 		}
 		std::cout << "Local socket address is " << get_address_string(&local_address_data) << std::endl;
 
 
 		if (directive == SEND_RECEIVE) {
-			sockaddr_in target_address;
-			configure_receiver_socket(&target_address);
+			sockaddr_in target_address{};
+			select_receiver_address(&target_address);
 
 			std::string MessageBuffer;
 			get_message_into(MessageBuffer);
 
-			sendto(
+			const int send_result = sendto(
 				client_socket,
 				MessageBuffer.c_str(),
-				MessageBuffer.length(),
+				static_cast<int>(MessageBuffer.length()),
 				0,
-				(sockaddr*)&target_address,
+				reinterpret_cast<sockaddr*>(&target_address),
 				sizeof(target_address)
 			);
-			clear_and_flush_input_stream();
+			if (send_result == SOCKET_ERROR) {
+				std::cout << "Sending the message failed (" << get_last_sockets_error() << ")! Aborting..." << std::endl;
+				closesocket(client_socket);
+				std::cout << "Socket closed." << std::endl;
+				cleanup_sockets_API();
+				return EXIT_FAILURE;
+			}
 			std::cout << "Message has been sent succesfully from " + get_address_string(&local_address_data) << std::endl;
 		}
 
@@ -103,15 +116,15 @@ int main() {
 	} while (true);
 
 	cleanup_sockets_API();
-	return 0;
+	return EXIT_SUCCESS;
 }
 
-int8_t startup_sockets_API() {
+int startup_sockets_API() {
 	WSADATA WSA_data;
-	int startup_result = WSAStartup(MAKEWORD(2, 2), &WSA_data);
+	const int startup_result = WSAStartup(MAKEWORD(2, 2), &WSA_data);
 	if (startup_result != 0) {
 		std::cerr << "WSAStartup failed (" << startup_result << ")!" << std::endl;
-		return -1;
+		return SOCKET_ERROR;
 	}
 	std::cout << "WSAStartup succeeded." << std::endl;
 	return 0;
@@ -123,18 +136,18 @@ void cleanup_sockets_API()
 	std::cout << "WSACleanup succeeded." << std::endl;
 }
 
-void clear_and_flush_input_stream()
+void reset_input_stream()
 {
 	std::cin.clear();
 	std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
-	std::cout << std::flush;
 }
 
-int8_t get_socket_address(SOCKET socket, sockaddr_in& socket_address)
+int get_socket_address(SOCKET socket, sockaddr_in& socket_address)
 {
-	int socket_address_size = sizeof(sockaddr_in);
-	int socket_address_result = getsockname(socket, (sockaddr*)&socket_address, &socket_address_size);
+	int socket_address_size = sizeof(socket_address);
+	int socket_address_result = getsockname(socket, reinterpret_cast<sockaddr*>(&socket_address), &socket_address_size);
 	if (socket_address_result == SOCKET_ERROR) {
+		std::cout << "Retrieving socket address failed (" << get_last_sockets_error() << ")!";
 		return SOCKET_ERROR;
 	}
 	return 0;
@@ -145,7 +158,7 @@ std::string get_address_string(sockaddr_in *address)
 	char IP_address[INET_ADDRSTRLEN];
 	PCSTR IP_address_result = inet_ntop(AF_INET, &(address->sin_addr), IP_address, INET_ADDRSTRLEN);
 	if (IP_address_result == NULL) {
-		return "";
+		return "<invalid>";
 	}
 	u_short port = ntohs(address->sin_port);
 
@@ -153,20 +166,15 @@ std::string get_address_string(sockaddr_in *address)
 	return address_string;
 }
 
-void configure_receiver_socket(sockaddr_in *receiver_address) {
+void select_receiver_address(sockaddr_in *receiver_address) {
 	// todo: make the ip protocol agnostic
 	receiver_address->sin_family = AF_INET;
 
 	std::string IP_address = LOOPBACK_IPv4;
 	do {
 		std::cout << "Enter IP address to bind the receiver (default 127.0.0.1): ";
-
-		std::cin.clear();
 		std::getline(std::cin, IP_address);
-		if (IP_address.length() == 0) {
-			IP_address = LOOPBACK_IPv4;
-			break;
-		}
+		if (IP_address.length() == 0) IP_address = LOOPBACK_IPv4;
 
 		unsigned short int valid_IP_address = inet_pton(AF_INET, IP_address.c_str(), &receiver_address->sin_addr);
 		if (valid_IP_address == 1) break;
@@ -175,13 +183,17 @@ void configure_receiver_socket(sockaddr_in *receiver_address) {
 		std::cerr << "    Invalid IP address format!" << std::endl;
 	} while (true);
 
-	int port = 8080;
+	int port;
 	do {
-		std::cout << "Enter port number to bind the receiver (default 8080): ";
+		std::cout << "Enter port number to bind the receiver: ";
 		std::cin >> port;
-		clear_and_flush_input_stream();
+		if (std::cin.fail()) {
+			reset_input_stream();
+			continue;
+		}
+		reset_input_stream();
 
-		if (!std::cin.fail() && port > 0 && port <= 65535) {
+		if (port > 0 && port <= 65535) {
 			receiver_address->sin_port = htons(port);
 			break;
 		}
@@ -194,13 +206,14 @@ void configure_receiver_socket(sockaddr_in *receiver_address) {
 	std::cout << "Receiver successfully configured on " << get_address_string(receiver_address) << std::endl;
 }
 
-void get_message_into(std::string MessageBuffer) {
+void get_message_into(std::string& MessageBuffer) {
 	do {
 		std::cout << "Enter message to send to server: ";
-		std::cin >> MessageBuffer;
-		if (MessageBuffer.length() > PACKET_SIZE) MessageBuffer.resize(PACKET_SIZE);
-		// todo: test the overflow error again
-		clear_and_flush_input_stream();
+		std::getline(std::cin, MessageBuffer);
+		if (MessageBuffer.length() > PACKET_SIZE) { 
+			std::cout << "Message exceeded maximum buffer size (" << PACKET_SIZE << "). " << MessageBuffer.length() - PACKET_SIZE << " characters will be truncated!" << std::endl;
+			MessageBuffer.resize(PACKET_SIZE); 
+		}
 
 		std::cout <<
 			"The following message will be sent to the server: " << std::endl <<
@@ -209,7 +222,8 @@ void get_message_into(std::string MessageBuffer) {
 
 		char confirmation;
 		std::cin >> confirmation;
-		if (confirmation == 'y') break;
+		reset_input_stream();
+		if (confirmation == 'y' || confirmation == 'Y') break;
 	} while (true);
 }
 
@@ -219,41 +233,47 @@ void block_until_input(SOCKET socket) {
 	Receiving_Packets = false;
 	closesocket(socket);
 
-	Output_Stream_Lock.lock();
-	std::cout << "Socket successfully closed." << std::endl;
-	Output_Stream_Lock.unlock();
+	std::lock_guard<std::mutex> lock(Output_Stream_Lock);
+	std::cout << "Socket closed." << std::endl;
 }
 
 void receive_packets(SOCKET socket) {
-	char ReceiveBuffer[PACKET_SIZE];
+	char ReceiveBuffer[PACKET_SIZE + 1];
 
 	while (Receiving_Packets) {
-		sockaddr_in sender_address;
-		int address_size = sizeof(sockaddr_in);
-		int bytesReceived = recvfrom(
+		sockaddr_in sender_address{};
+		int address_size = sizeof(sender_address);
+		int bytes_received = recvfrom(
 			socket,
 			ReceiveBuffer,
-			sizeof(ReceiveBuffer) - 1,
+			PACKET_SIZE,
 			0,
-			(sockaddr*)&sender_address,
+			reinterpret_cast<sockaddr*>(&sender_address),
 			&address_size
 		);
 
 		if (!Receiving_Packets) break;
-		if (bytesReceived == SOCKET_ERROR) {
-			std::cerr << "Error reading packet (" << WSAGetLastError() << ")! Aborting for this packet..." << std::endl;
+		if (bytes_received == SOCKET_ERROR) {
+			std::lock_guard<std::mutex> lock(Output_Stream_Lock);
+			std::cerr 
+				<< std::endl
+				<< get_address_string(&sender_address) << std::endl
+				<< "Error reading packet (" << get_last_sockets_error() << ")! Aborting for this packet..." << std::endl;
 			continue;
 		}
-		ReceiveBuffer[bytesReceived] = '\0';
 
-		Output_Stream_Lock.lock();
-		std::cout << get_address_string(&sender_address) << std::endl;
-		std::cout << ReceiveBuffer << std::endl;
-		Output_Stream_Lock.unlock();
+		ReceiveBuffer[bytes_received] = '\0';
 
-		std::this_thread::sleep_for(std::chrono::milliseconds(150));
+		std::lock_guard<std::mutex> lock(Output_Stream_Lock);
+		std::cout 
+			<< std::endl 
+			<< get_address_string(&sender_address) << std::endl
+			<< ReceiveBuffer << std::endl;
 	}
-	Output_Stream_Lock.lock();
+	std::lock_guard<std::mutex> lock(Output_Stream_Lock);
 	std::cout << "Stopped receiving packets." << std::endl;
-	Output_Stream_Lock.unlock();
+}
+
+int get_last_sockets_error() {
+	return WSAGetLastError();
 }
